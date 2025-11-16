@@ -316,7 +316,7 @@ func (m *Manager) Logout(loginID string, device ...string) error {
 		return nil
 	}
 
-	return m.removeTokenChain(tokenStr, true, listener.EventLogout)
+	return m.removeTokenChain(tokenStr, false, listener.EventLogout)
 }
 
 // LogoutByToken Logout by token | 根据Token登出
@@ -325,7 +325,7 @@ func (m *Manager) LogoutByToken(tokenValue string) error {
 		return nil
 	}
 
-	return m.removeTokenChain(tokenValue, true, listener.EventLogout)
+	return m.removeTokenChain(tokenValue, false, listener.EventLogout)
 }
 
 // kickout Kick user offline (private) | 踢人下线（私有）
@@ -572,7 +572,7 @@ func (m *Manager) SetPermissions(loginID string, permissions []string) error {
 	if err != nil {
 		return err
 	}
-	return sess.Set(SessionKeyPermissions, permissions)
+	return sess.Set(SessionKeyPermissions, permissions, m.getExpiration())
 }
 
 // GetPermissions Gets permission list | 获取权限列表
@@ -666,7 +666,7 @@ func (m *Manager) SetRoles(loginID string, roles []string) error {
 	if err != nil {
 		return err
 	}
-	return sess.Set(SessionKeyRoles, roles)
+	return sess.Set(SessionKeyRoles, roles, m.getExpiration())
 }
 
 // GetRoles Gets role list | 获取角色列表
