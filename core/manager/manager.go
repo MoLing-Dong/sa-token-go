@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/click33/sa-token-go/core/pool"
 	"strings"
@@ -17,15 +18,17 @@ import (
 
 // Constants for storage keys and default values | 存储键和默认值常量
 const (
-	DefaultDevice   = "default"
-	DefaultPrefix   = "satoken"
-	DisableValue    = "1"
-	DefaultNonceTTL = 5 * time.Minute
+	DefaultDevice     = "default"
+	DefaultPrefix     = "satoken"
+	DisableValue      = "1"
+	DefaultRenewValue = "1"
+	DefaultNonceTTL   = 5 * time.Minute
 
 	// Key prefixes | 键前缀
 	TokenKeyPrefix   = "token:"
 	AccountKeyPrefix = "account:"
 	DisableKeyPrefix = "disable:"
+	RenewKeyPrefix   = "renew:"
 
 	// Session keys | Session键
 	SessionKeyLoginID     = "loginId"
@@ -39,12 +42,23 @@ const (
 	PermissionSeparator = ":"
 )
 
+// TokenState 表示 Token 的逻辑状态
+type TokenState string
+
+const (
+	TokenStateKickout  TokenState = "KICK_OUT"
+	TokenStateReplaced TokenState = "BE_REPLACED"
+)
+
 // Error variables | 错误变量
 var (
-	ErrAccountDisabled  = fmt.Errorf("account is disabled")
-	ErrNotLogin         = fmt.Errorf("not login")
-	ErrTokenNotFound    = fmt.Errorf("token not found")
-	ErrInvalidTokenData = fmt.Errorf("invalid token data")
+	ErrAccountDisabled    = fmt.Errorf("account is disabled")
+	ErrNotLogin           = fmt.Errorf("not login")
+	ErrTokenNotFound      = fmt.Errorf("token not found")
+	ErrInvalidTokenData   = fmt.Errorf("invalid token data")
+	ErrLoginLimitExceeded = fmt.Errorf("login count exceeds the maximum limit")
+	ErrTokenKickout       = fmt.Errorf("token has been kicked out")
+	ErrTokenReplaced      = fmt.Errorf("token has been replaced")
 )
 
 // TokenInfo Token information | Token信息
@@ -110,10 +124,11 @@ func NewManager(storage adapter.Storage, cfg *config.Config) *Manager {
 	}
 }
 
-// Close closes the Manager and releases resources | 关闭Manager并释放资源
-func (m *Manager) Close() {
+// CloseManager Closes the manager and releases all resources | 关闭管理器并释放所有资源
+func (m *Manager) CloseManager() {
 	if m.renewPool != nil {
-		m.renewPool.Stop() // 安全关闭 renewPool
+		// 安全关闭 renewPool
+		m.renewPool.Stop()
 		m.renewPool = nil
 	}
 }
@@ -146,16 +161,45 @@ func assertString(v any) (string, bool) {
 
 // Login Performs user login and returns token | 登录，返回Token
 func (m *Manager) Login(loginID string, device ...string) (string, error) {
-	deviceType := getDevice(device)
-
-	// Check if account is disabled | 检查是否被封禁
+	// Check if account is disabled | 检查账号是否被封禁
 	if m.IsDisable(loginID) {
 		return "", ErrAccountDisabled
 	}
 
-	// Kick out old session if concurrent login is not allowed | 如果不允许并发登录，先踢掉旧的
+	deviceType := getDevice(device)
+	accountKey := m.getAccountKey(loginID, deviceType)
+
+	// Handle shared token for concurrent login | 处理多人登录共用 Token 的情况
+	if m.config.IsShare {
+		// Look for existing token of this account + device | 查找账号 + 设备下是否已有登录 Token
+		existingToken, err := m.storage.Get(accountKey)
+		if err == nil && existingToken != nil {
+			if tokenStr, ok := assertString(existingToken); ok && m.IsLogin(tokenStr) {
+				// If valid token exists, return it directly | 如果已有 Token 且有效，则直接返回
+				return tokenStr, nil
+			}
+		}
+	}
+
+	// Handle concurrent login behavior | 处理并发登录逻辑
 	if !m.config.IsConcurrent {
-		m.kickout(loginID, deviceType)
+		// Concurrent login not allowed → kick out previous login on same device | 不允许并发登录 → 踢掉同设备下之前的 Token
+		_ = m.kickout(loginID, deviceType)
+
+	} else if m.config.MaxLoginCount > 0 && !m.config.IsShare {
+		// MaxLoginCount = 0 → 不允许任何 Token
+		if m.config.MaxLoginCount == 0 {
+			return "", ErrLoginLimitExceeded
+		}
+
+		// Concurrent login allowed but limited by MaxLoginCount | 允许并发登录但受 MaxLoginCount 限制
+		// This limit applies to all tokens of this account across devices | 该限制针对账号所有设备的登录 Token 数量
+		tokens, _ := m.GetTokenValueListByLoginID(loginID)
+		if len(tokens) >= m.config.MaxLoginCount {
+			// Reached maximum concurrent login count | 已达到最大并发登录数
+			// You may change to "kick out earliest token" if desired | 如需也可改为“踢掉最早 Token”
+			return "", ErrLoginLimitExceeded
+		}
 	}
 
 	// Generate token | 生成Token
@@ -164,25 +208,45 @@ func (m *Manager) Login(loginID string, device ...string) (string, error) {
 		return "", fmt.Errorf("failed to generate token: %w", err)
 	}
 
+	nowTime := time.Now().Unix()
 	expiration := m.getExpiration()
 
-	// Save token-loginID mapping (符合 Java sa-token 设计) | 保存 Token-LoginID 映射
+	// Prepare TokenInfo object and serialize to JSON | 准备Token信息对象并序列化为JSON
+	tokenInfoStr, err := json.Marshal(TokenInfo{
+		LoginID:    loginID,
+		Device:     deviceType,
+		CreateTime: nowTime,
+		ActiveTime: nowTime,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal tokenInfo: %w", err)
+	}
+
+	// Save token-tokenInfo mapping | 保存 TokenKey-TokenInfo 映射
 	tokenKey := m.getTokenKey(tokenValue)
-	if err := m.storage.Set(tokenKey, loginID, expiration); err != nil {
+	if err = m.storage.Set(tokenKey, string(tokenInfoStr), expiration); err != nil {
 		return "", fmt.Errorf("failed to save token: %w", err)
 	}
 
-	// Save account-token mapping | 保存账号-Token映射
-	accountKey := m.getAccountKey(loginID, deviceType)
-	if err := m.storage.Set(accountKey, tokenValue, expiration); err != nil {
+	// Save account-token mapping | 保存 AccountKey-Token 映射
+	if err = m.storage.Set(accountKey, tokenValue, expiration); err != nil {
 		return "", fmt.Errorf("failed to save account mapping: %w", err)
 	}
 
 	// Create session | 创建Session
-	sess := session.NewSession(loginID, m.storage, m.prefix)
-	sess.Set(SessionKeyLoginID, loginID)
-	sess.Set(SessionKeyDevice, deviceType)
-	sess.Set(SessionKeyLoginTime, time.Now().Unix())
+	err = session.
+		NewSession(loginID, m.storage, m.prefix).
+		SetMulti(
+			map[string]any{
+				SessionKeyLoginID:   loginID,
+				SessionKeyDevice:    deviceType,
+				SessionKeyLoginTime: nowTime,
+			},
+			expiration,
+		)
+	if err != nil {
+		return "", fmt.Errorf("failed to save session: %w", err)
+	}
 
 	// Trigger login event | 触发登录事件
 	if m.eventManager != nil {
@@ -199,17 +263,40 @@ func (m *Manager) Login(loginID string, device ...string) (string, error) {
 
 // LoginByToken Login with specified token (for seamless token refresh) | 使用指定Token登录（用于token无感刷新）
 func (m *Manager) LoginByToken(loginID string, tokenValue string, device ...string) error {
-	deviceType := getDevice(device)
-	expiration := m.getExpiration()
-
-	// Save token-loginID mapping (符合 Java sa-token 设计) | 保存 Token-LoginID 映射
-	tokenKey := m.getTokenKey(tokenValue)
-	if err := m.storage.Set(tokenKey, loginID, expiration); err != nil {
-		return fmt.Errorf("failed to save token: %w", err)
+	info, err := m.getTokenInfo(tokenValue)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return ErrInvalidTokenData
 	}
 
-	accountKey := m.getAccountKey(loginID, deviceType)
-	return m.storage.Set(accountKey, tokenValue, expiration)
+	// Check if the account is disabled | 检查账号是否被封禁
+	if m.IsDisable(info.LoginID) {
+		return ErrAccountDisabled
+	}
+
+	now := time.Now().Unix()
+	expiration := m.getExpiration()
+
+	// Update last active time only | 更新活跃时间（轻量刷新）
+	info.ActiveTime = now
+
+	// Write back updated TokenInfo (保留原TTL)
+	if data, err := json.Marshal(info); err == nil {
+		_ = m.storage.SetKeepTTL(m.getTokenKey(tokenValue), data)
+	}
+
+	// Extend TTL for token, account, session | 延长Token、账号、Session的过期时间
+	if expiration > 0 {
+		_ = m.storage.Expire(m.getTokenKey(tokenValue), expiration)
+		_ = m.storage.Expire(m.getAccountKey(info.LoginID, info.Device), expiration)
+		if sess, err := m.GetSession(info.LoginID); err == nil && sess != nil {
+			_ = sess.Renew(expiration)
+		}
+	}
+
+	return nil
 }
 
 // Logout Performs user logout | 登出
@@ -222,28 +309,13 @@ func (m *Manager) Logout(loginID string, device ...string) error {
 		return nil // Already logged out | 已经登出
 	}
 
-	// Delete token | 删除Token
+	// Assert token value type | 类型断言为字符串
 	tokenStr, ok := assertString(tokenValue)
 	if !ok {
 		return nil
 	}
 
-	tokenKey := m.getTokenKey(tokenStr)
-	m.storage.Delete(tokenKey)
-
-	// Delete account mapping | 删除账号映射
-	m.storage.Delete(accountKey)
-
-	// Trigger logout event | 触发登出事件
-	if m.eventManager != nil {
-		m.eventManager.Trigger(&listener.EventData{
-			Event:   listener.EventLogout,
-			LoginID: loginID,
-			Device:  deviceType,
-		})
-	}
-
-	return nil
+	return m.removeTokenChain(tokenStr, true, listener.EventLogout)
 }
 
 // LogoutByToken Logout by token | 根据Token登出
@@ -252,22 +324,7 @@ func (m *Manager) LogoutByToken(tokenValue string) error {
 		return nil
 	}
 
-	// Get loginID before deletion for event | 删除前获取loginID用于事件
-	loginID, _ := m.getLoginIDByToken(tokenValue)
-
-	tokenKey := m.getTokenKey(tokenValue)
-	err := m.storage.Delete(tokenKey)
-
-	// Trigger logout event | 触发登出事件
-	if m.eventManager != nil && loginID != "" {
-		m.eventManager.Trigger(&listener.EventData{
-			Event:   listener.EventLogout,
-			LoginID: loginID,
-			Token:   tokenValue,
-		})
-	}
-
-	return err
+	return m.removeTokenChain(tokenValue, true, listener.EventLogout)
 }
 
 // kickout Kick user offline (private) | 踢人下线（私有）
@@ -283,25 +340,23 @@ func (m *Manager) kickout(loginID string, device string) error {
 		return nil
 	}
 
-	tokenKey := m.getTokenKey(tokenStr)
-
-	// Trigger kickout event | 触发踢出事件
-	if m.eventManager != nil {
-		m.eventManager.Trigger(&listener.EventData{
-			Event:   listener.EventKickout,
-			LoginID: loginID,
-			Token:   tokenStr,
-			Device:  device,
-		})
-	}
-
-	return m.storage.Delete(tokenKey)
+	return m.removeTokenChain(tokenStr, false, listener.EventKickout)
 }
 
 // Kickout Kick user offline (public method) | 踢人下线（公开方法）
 func (m *Manager) Kickout(loginID string, device ...string) error {
 	deviceType := getDevice(device)
 	return m.kickout(loginID, deviceType)
+}
+
+// kickoutByToken Kick user offline (private) | 根据Token踢人下线（私有）
+func (m *Manager) kickoutByToken(tokenValue string) error {
+	return m.removeTokenChain(tokenValue, false, listener.EventKickout)
+}
+
+// KickoutByToken Kick user offline (public method) | 根据Token踢人下线（公开方法）
+func (m *Manager) KickoutByToken(tokenValue string) error {
+	return m.kickoutByToken(tokenValue)
 }
 
 // ============ Token Validation | Token验证 ============
@@ -311,34 +366,32 @@ func (m *Manager) IsLogin(tokenValue string) bool {
 	if tokenValue == "" {
 		return false
 	}
-
-	tokenKey := m.getTokenKey(tokenValue)
-	if !m.storage.Exists(tokenKey) {
+	if _, err := m.getTokenInfo(tokenValue, false); err != nil {
 		return false
 	}
 
 	// Async auto-renew for better performance | 异步自动续期（提高性能）
 	// Note: ActiveTimeout feature removed to comply with Java sa-token design
 	if m.config.AutoRenew && m.config.Timeout > 0 {
-		if m.renewPool != nil {
-			// Submit token renewal task to the pool | 提交续期任务到续期池
-			_ = m.renewPool.Submit(func() {
-				m.renewToken(tokenKey)
-			})
-		} else {
-			// Fallback to go routine if pool is not configured | 如果续期池未配置，使用普通协程
-			go m.renewToken(tokenKey)
+		tokenKey := m.getTokenKey(tokenValue)
+		if ttl, err := m.storage.TTL(tokenKey); err == nil {
+			ttlSeconds := int64(ttl.Seconds())
+
+			// Perform renewal if TTL is below MaxRefresh threshold and RenewInterval allows | TTL和RenewInterval同时满足条件才续期
+			if ttlSeconds > 0 && (m.config.MaxRefresh <= 0 || ttlSeconds <= m.config.MaxRefresh) && (m.config.RenewInterval <= 0 || !m.storage.Exists(m.getRenewKey(tokenValue))) {
+				renewFunc := func() { m.renewToken(tokenValue) }
+
+				// Submit to pool if configured, otherwise use goroutine | 使用续期池或协程执行续期
+				if m.renewPool != nil {
+					_ = m.renewPool.Submit(renewFunc) // Submit token renewal task to the pool | 提交Token续期任务到续期池
+				} else {
+					go renewFunc() // Fallback to goroutine if pool is not configured | 如果续期池未配置，使用普通协程
+				}
+			}
 		}
 	}
 
 	return true
-}
-
-// renewToken Renews token expiration asynchronously | 异步续期Token
-func (m *Manager) renewToken(tokenKey string) {
-	expiration := m.getExpiration()
-	// Extend token storage expiration | 延长Token存储的过期时间
-	m.storage.Expire(tokenKey, expiration)
 }
 
 // CheckLogin Checks login status (throws error if not logged in) | 检查登录（未登录抛出错误）
@@ -347,6 +400,41 @@ func (m *Manager) CheckLogin(tokenValue string) error {
 		return ErrNotLogin
 	}
 	return nil
+}
+
+// CheckLoginWithState Checks if user is logged in | 检查是否登录（返回详细状态）
+func (m *Manager) CheckLoginWithState(tokenValue string) (bool, error) {
+	if tokenValue == "" {
+		return false, nil
+	}
+
+	// Try to get token info with state check | 尝试获取Token信息（包含状态检查）
+	_, err := m.getTokenInfo(tokenValue)
+	if err != nil {
+		return false, err
+	}
+
+	// Async auto-renew for better performance | 异步自动续期（提高性能）
+	// Note: ActiveTimeout feature removed to comply with Java sa-token design
+	if m.config.AutoRenew && m.config.Timeout > 0 {
+		if ttl, err := m.storage.TTL(m.getTokenKey(tokenValue)); err == nil {
+			ttlSeconds := int64(ttl.Seconds())
+
+			// Perform renewal if TTL is below MaxRefresh threshold and RenewInterval allows | TTL和RenewInterval同时满足条件才续期
+			if ttlSeconds > 0 && (m.config.MaxRefresh <= 0 || ttlSeconds <= m.config.MaxRefresh) && (m.config.RenewInterval <= 0 || !m.storage.Exists(m.getRenewKey(tokenValue))) {
+				renewFunc := func() { m.renewToken(tokenValue) }
+
+				// Submit to pool if configured, otherwise use goroutine | 使用续期池或协程执行续期
+				if m.renewPool != nil {
+					_ = m.renewPool.Submit(renewFunc) // Submit token renewal task to the pool | 提交Token续期任务到续期池
+				} else {
+					go renewFunc() // Fallback to goroutine if pool is not configured | 如果续期池未配置，使用普通协程
+				}
+			}
+		}
+	}
+
+	return true, nil
 }
 
 // GetLoginID Gets login ID from token | 根据Token获取登录ID
@@ -359,6 +447,9 @@ func (m *Manager) GetLoginID(tokenValue string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if info == nil {
+		return "", ErrInvalidTokenData
+	}
 
 	return info.LoginID, nil
 }
@@ -369,7 +460,10 @@ func (m *Manager) GetLoginIDNotCheck(tokenValue string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return info.LoginID, nil
+	if info == nil {
+		return "", ErrInvalidTokenData
+	}
+	return info.LoginID, err
 }
 
 // GetTokenValue Gets token by login ID | 根据登录ID获取Token
@@ -399,7 +493,17 @@ func (m *Manager) GetTokenInfo(tokenValue string) (*TokenInfo, error) {
 
 // Disable Disables an account | 封禁账号
 func (m *Manager) Disable(loginID string, duration time.Duration) error {
+	// Check if the account has active sessions and force logout | 检查账号是否有活跃会话并强制下线
+	tokens, err := m.GetTokenValueListByLoginID(loginID)
+	if err == nil && len(tokens) > 0 {
+		for _, tokenValue := range tokens {
+			// Force kick out each active token | 强制踢出所有活跃的Token
+			_ = m.removeTokenChain(tokenValue, true, listener.EventLogout)
+		}
+	}
+
 	key := m.getDisableKey(loginID)
+	// Set disable flag with specified duration | 设置封禁标记并指定封禁时长
 	return m.storage.Set(key, DisableValue, duration)
 }
 
@@ -673,34 +777,160 @@ func (m *Manager) getAccountKey(loginID, device string) string {
 	return m.prefix + AccountKeyPrefix + loginID + PermissionSeparator + device
 }
 
+// getRenewKey Gets token renewal tracking key | 获取Token续期追踪键
+func (m *Manager) getRenewKey(tokenValue string) string {
+	return m.prefix + RenewKeyPrefix + tokenValue
+}
+
 // getLoginIDByToken Gets loginID by token (符合 Java sa-token 设计) | 通过 Token 获取 loginID
 func (m *Manager) getLoginIDByToken(tokenValue string) (string, error) {
+	info, err := m.getTokenInfo(tokenValue)
+	if err != nil {
+		return "", err
+	}
+	return info.LoginID, nil
+}
+
+// getTokenInfo Gets token information | 获取Token信息
+func (m *Manager) getTokenInfo(tokenValue string, checkState ...bool) (*TokenInfo, error) {
 	tokenKey := m.getTokenKey(tokenValue)
 	data, err := m.storage.Get(tokenKey)
 	if err != nil || data == nil {
-		return "", ErrTokenNotFound
-	}
-
-	loginID, ok := assertString(data)
-	if !ok {
-		return "", ErrInvalidTokenData
-	}
-
-	return loginID, nil
-}
-
-// getTokenInfo Gets token information (为了向后兼容) | 获取Token信息（向后兼容）
-func (m *Manager) getTokenInfo(tokenValue string) (*TokenInfo, error) {
-	loginID, err := m.getLoginIDByToken(tokenValue)
-	if err != nil {
 		return nil, err
 	}
 
-	// 构造简化的 TokenInfo，只包含必要信息
-	return &TokenInfo{
-		LoginID: loginID,
-		Device:  DefaultDevice, // 从 token 无法获取设备信息
-	}, nil
+	// Convert storage value to string | 将存储值统一转换为字符串
+	var str string
+	switch v := data.(type) {
+	case []byte:
+		str = string(v)
+	case string:
+		str = v
+	default:
+		return nil, ErrInvalidTokenData
+	}
+
+	// Check for special token states (if enabled) | 检查是否为特殊状态（当启用检查时）
+	if len(checkState) == 0 || checkState[0] {
+		switch str {
+		case string(TokenStateKickout):
+			return nil, ErrTokenKickout // 被踢下线
+		case string(TokenStateReplaced):
+			return nil, ErrTokenReplaced // 被顶号下线
+		}
+	}
+
+	// Parse TokenInfo from JSON | 从JSON解析Token信息
+	var info TokenInfo
+	if err := json.Unmarshal([]byte(str), &info); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidTokenData, err)
+	}
+
+	return &info, nil
+}
+
+// renewToken Renews token expiration asynchronously | 异步续期Token
+func (m *Manager) renewToken(tokenValue string) {
+	tokenKey := m.getTokenKey(tokenValue)
+	info, err := m.getTokenInfo(tokenValue)
+	if err != nil {
+		return
+	}
+
+	// Basic validation | 基本校验
+	if info == nil || info.LoginID == "" || info.Device == "" {
+		return
+	}
+
+	// Update ActiveTime and keep original TTL | 更新 ActiveTime，保持原 TTL 不变
+	info.ActiveTime = time.Now().Unix()
+	if tokenInfo, err := json.Marshal(info); err == nil {
+		_ = m.storage.SetKeepTTL(tokenKey, tokenInfo)
+	}
+
+	// Extend TTL for token and its accountKey | 为 Token 与对应 accountKey 延长 TTL
+	exp := m.getExpiration()
+	if exp > 0 {
+		// Renew token TTL | 续期 Token TTL
+		_ = m.storage.Expire(tokenKey, exp)
+
+		// Renew accountKey TTL | 续期账号映射 TTL
+		accountKey := m.getAccountKey(info.LoginID, info.Device)
+		_ = m.storage.Expire(accountKey, exp)
+
+		// Renew session TTL | 续期 Session TTL
+		if sess, err := m.GetSession(info.LoginID); err == nil && sess != nil {
+			_ = sess.Renew(exp)
+		}
+	}
+
+	// Set minimal renewal interval marker | 设置最小续期间隔标记（限流续期频率）
+	if m.config.RenewInterval > 0 {
+		_ = m.storage.Set(
+			m.getRenewKey(tokenValue),
+			DefaultRenewValue,
+			time.Duration(m.config.RenewInterval)*time.Second,
+		)
+	}
+}
+
+// removeTokenChain Removes all related keys and triggers event | 删除Token相关的所有键并触发事件
+func (m *Manager) removeTokenChain(tokenValue string, destroySession bool, event listener.Event) error {
+	if tokenValue == "" {
+		return nil
+	}
+
+	// Get TokenInfo  | 获取Token信息
+	info, err := m.getTokenInfo(tokenValue, false)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return ErrInvalidTokenData
+	}
+
+	tokenKey := m.getTokenKey(tokenValue)                    // Token存储键 | Token storage key
+	accountKey := m.getAccountKey(info.LoginID, info.Device) // Account映射键 | Account mapping key
+	renewKey := m.getRenewKey(tokenValue)                    // 续期追踪键 | Token renewal tracking key
+
+	switch event {
+
+	// EventLogout User logout | 用户主动登出
+	case listener.EventLogout:
+		_ = m.storage.Delete(tokenKey)   // Delete token-info mapping | 删除Token信息映射
+		_ = m.storage.Delete(accountKey) // Delete account-token mapping | 删除账号映射
+		_ = m.storage.Delete(renewKey)   // Delete renew key | 删除续期标记
+		if destroySession {              // Optionally destroy session | 可选销毁Session
+			_ = m.DeleteSession(info.LoginID)
+		}
+
+	// EventKickout User kicked offline (keep session) | 用户被踢下线（保留Session）
+	case listener.EventKickout:
+		_ = m.storage.SetKeepTTL(tokenKey, string(TokenStateKickout)) // Mark token as kicked out (preserve original TTL for cleanup) | 将Token标记为“被踢下线”（保留原TTL以便自动清理）
+		_ = m.storage.Delete(accountKey)                              // Delete account mapping | 删除账号映射
+		_ = m.storage.Delete(renewKey)                                // Delete renew key | 删除续期标记
+
+	// Default Unknown event type | 未知事件类型（默认删除）
+	default:
+		_ = m.storage.Delete(tokenKey)
+		_ = m.storage.Delete(accountKey)
+		_ = m.storage.Delete(renewKey)
+		if destroySession {
+			_ = m.DeleteSession(info.LoginID)
+		}
+	}
+
+	// Trigger event notification | 触发事件通知
+	if m.eventManager != nil {
+		m.eventManager.Trigger(&listener.EventData{
+			Event:   event,
+			LoginID: info.LoginID,
+			Token:   tokenValue,
+			Device:  info.Device,
+		})
+	}
+
+	return nil
 }
 
 // toStringSlice Converts any to []string | 将any转换为[]string

@@ -106,6 +106,17 @@ func (s *Storage) Set(key string, value any, expiration time.Duration) error {
 	return s.client.Set(ctx, s.getKey(key), value, expiration).Err()
 }
 
+// SetKeepTTL Sets value without modifying TTL | 设置键值但不改变TTL
+func (s *Storage) SetKeepTTL(key string, value any) error {
+	ctx, cancel := s.withTimeout()
+	defer cancel()
+
+	// Use SET key value KeepTTL | 使用 SET key value KeepTTL
+	return s.client.SetArgs(ctx, s.getKey(key), value, redis.SetArgs{
+		KeepTTL: true, // Keep original TTL | 保留原有TTL
+	}).Err()
+}
+
 // Get 获取值
 func (s *Storage) Get(key string) (any, error) {
 	ctx, cancel := s.withTimeout()
@@ -187,7 +198,7 @@ func (s *Storage) TTL(key string) (time.Duration, error) {
 	return s.client.TTL(ctx, s.getKey(key)).Result()
 }
 
-// Clear 清空所有数据（⚠️ 警告：会清空整个 Redis，谨慎使用！应由 Manager 层控制）
+// Clear 清空所有数据（警告：会清空整个 Redis，谨慎使用！应由 Manager 层控制）
 func (s *Storage) Clear() error {
 	ctx, cancel := s.withTimeout()
 	defer cancel()

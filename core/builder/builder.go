@@ -17,6 +17,8 @@ type Builder struct {
 	storage                adapter.Storage
 	tokenName              string
 	timeout                int64
+	maxRefresh             int64
+	renewInterval          int64
 	activeTimeout          int64
 	isConcurrent           bool
 	isShare                bool
@@ -41,6 +43,8 @@ func NewBuilder() *Builder {
 	return &Builder{
 		tokenName:              config.DefaultTokenName,
 		timeout:                config.DefaultTimeout,
+		maxRefresh:             config.DefaultTimeout / 2,
+		renewInterval:          config.NoLimit,
 		activeTimeout:          config.NoLimit,
 		isConcurrent:           true,
 		isShare:                true,
@@ -87,6 +91,18 @@ func (b *Builder) Timeout(seconds int64) *Builder {
 // TimeoutDuration sets timeout with duration | 设置超时时间（时间段）
 func (b *Builder) TimeoutDuration(d time.Duration) *Builder {
 	b.timeout = int64(d.Seconds())
+	return b
+}
+
+// MaxRefresh sets threshold for async token renewal | 设置Token自动续期触发阈值
+func (b *Builder) MaxRefresh(seconds int64) *Builder {
+	b.maxRefresh = seconds
+	return b
+}
+
+// RenewInterval sets minimum interval between token renewals | 设置Token最小续期间隔
+func (b *Builder) RenewInterval(seconds int64) *Builder {
+	b.renewInterval = seconds
 	return b
 }
 
@@ -290,6 +306,21 @@ func (b *Builder) Validate() error {
 		return fmt.Errorf("at least one of IsReadHeader, IsReadCookie, or IsReadBody must be true")
 	}
 
+	// Check MaxRefresh
+	if b.maxRefresh < config.NoLimit {
+		return fmt.Errorf("MaxRefresh must be >= -1, got: %d", b.maxRefresh)
+	}
+
+	// Check MaxRefresh does not exceed Timeout
+	if b.timeout != config.NoLimit && b.maxRefresh > b.timeout {
+		return fmt.Errorf("MaxRefresh (%d) cannot be greater than Timeout (%d)", b.maxRefresh, b.timeout)
+	}
+
+	// Check RenewInterval
+	if b.renewInterval < config.NoLimit {
+		return fmt.Errorf("RenewInterval must be >= -1, got: %d", b.renewInterval)
+	}
+
 	// Validate RenewPoolConfig if set | 如果设置了续期池配置，进行验证
 	if b.renewPoolConfig != nil {
 		// Check MinSize and MaxSize | 检查最小和最大协程池大小
@@ -318,6 +349,7 @@ func (b *Builder) Validate() error {
 			return fmt.Errorf("RenewPoolConfig.Expiry must be a positive duration") // 过期时间必须是正值
 		}
 	}
+
 	return nil
 }
 
@@ -328,9 +360,16 @@ func (b *Builder) Build() *manager.Manager {
 		panic(fmt.Sprintf("invalid configuration: %v", err))
 	}
 
+	// Automatically adjust MaxRefresh if user customized Timeout but didn't set MaxRefresh | 自动调整MaxRefresh逻辑
+	if b.timeout != config.DefaultTimeout && b.maxRefresh == config.DefaultTimeout/2 {
+		b.maxRefresh = b.timeout / 2
+	}
+
 	cfg := &config.Config{
 		TokenName:              b.tokenName,
 		Timeout:                b.timeout,
+		MaxRefresh:             b.maxRefresh,
+		RenewInterval:          b.renewInterval,
 		ActiveTimeout:          b.activeTimeout,
 		IsConcurrent:           b.isConcurrent,
 		IsShare:                b.isShare,

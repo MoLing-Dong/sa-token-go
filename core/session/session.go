@@ -44,7 +44,7 @@ func NewSession(id string, storage adapter.Storage, prefix string) *Session {
 // ============ Data Operations | 数据操作 ============
 
 // Set Sets value | 设置值
-func (s *Session) Set(key string, value any) error {
+func (s *Session) Set(key string, value any, ttl ...time.Duration) error {
 	if key == "" {
 		return fmt.Errorf("key cannot be empty")
 	}
@@ -53,6 +53,34 @@ func (s *Session) Set(key string, value any) error {
 	defer s.mu.Unlock()
 
 	s.Data[key] = value
+	if len(ttl) > 0 && ttl[0] > 0 {
+		return s.saveWithTTL(ttl[0])
+	}
+
+	return s.save()
+}
+
+// SetMulti sets multiple key-value pairs | 设置多个键值对
+func (s *Session) SetMulti(values map[string]any, ttl ...time.Duration) error {
+	if len(values) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, value := range values {
+		if key == "" {
+			return fmt.Errorf("key cannot be empty")
+		}
+		s.Data[key] = value
+	}
+
+	if len(ttl) > 0 && ttl[0] > 0 {
+		fmt.Println("ttl:", ttl[0])
+		return s.saveWithTTL(ttl[0])
+	}
+
 	return s.save()
 }
 
@@ -167,6 +195,16 @@ func (s *Session) IsEmpty() bool {
 	return s.Size() == 0
 }
 
+// Renew extends the session TTL without modifying content | 续期 Session 的 TTL，但不修改内容
+func (s *Session) Renew(ttl time.Duration) error {
+	if ttl <= 0 {
+		return nil // 不允许设置 0 TTL，避免误删
+	}
+
+	key := s.getStorageKey()
+	return s.storage.Expire(key, ttl)
+}
+
 // ============ Internal Methods | 内部方法 ============
 
 // save Saves session to storage | 保存到存储
@@ -178,6 +216,18 @@ func (s *Session) save() error {
 
 	key := s.getStorageKey()
 	return s.storage.Set(key, string(data), 0)
+}
+
+// saveWithTTL saves session with TTL | 带 TTL 保存 Session
+func (s *Session) saveWithTTL(ttl time.Duration) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session: %w", err)
+	}
+
+	key := s.getStorageKey()
+	fmt.Println(ttl)
+	return s.storage.Set(key, string(data), ttl)
 }
 
 // getStorageKey Gets storage key for this session | 获取Session的存储键
@@ -198,18 +248,28 @@ func Load(id string, storage adapter.Storage, prefix string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	if data == nil {
 		return nil, ErrSessionNotFound
 	}
 
-	dataStr, ok := data.(string)
-	if !ok {
+	var (
+		raw     []byte
+		session Session
+	)
+
+	// Support both string and []byte | 同时兼容 string 和 []byte
+	switch v := data.(type) {
+	case string:
+		raw = []byte(v)
+
+	case []byte:
+		raw = v
+
+	default:
 		return nil, ErrInvalidSessionData
 	}
 
-	var session Session
-	if err := json.Unmarshal([]byte(dataStr), &session); err != nil {
+	if err := json.Unmarshal(raw, &session); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidSessionData, err)
 	}
 

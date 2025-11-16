@@ -70,6 +70,12 @@ type Config struct {
 	// Timeout Token expiration time in seconds, -1 for never expire | Token超时时间（单位：秒，-1代表永不过期）
 	Timeout int64
 
+	// MaxRefresh Threshold for triggering async token renewal (in seconds) | Token自动续期触发阈值（单位：秒，当剩余有效期低于该值时触发异步续期 -1或0代表不限制）
+	MaxRefresh int64
+
+	// RenewInterval Minimum interval between token renewals (ms) | Token最小续期间隔（单位：秒，同一个Token在此时间内只会续期一次 -1或0代表不限制）
+	RenewInterval int64
+
 	// ActiveTimeout Token minimum activity frequency in seconds. If Token is not accessed for this time, it will be frozen. -1 means no limit | Token最低活跃频率（单位：秒），如果Token超过此时间没有访问，则会被冻结。-1代表不限制，永不冻结
 	ActiveTimeout int64
 
@@ -149,6 +155,8 @@ func DefaultConfig() *Config {
 	return &Config{
 		TokenName:              DefaultTokenName,
 		Timeout:                DefaultTimeout,
+		MaxRefresh:             DefaultTimeout / 2,
+		RenewInterval:          NoLimit,
 		ActiveTimeout:          NoLimit,
 		IsConcurrent:           true,
 		IsShare:                true,
@@ -195,6 +203,21 @@ func (c *Config) Validate() error {
 	// Check Timeout
 	if c.Timeout < NoLimit {
 		return fmt.Errorf("Timeout must be >= -1, got: %d", c.Timeout)
+	}
+
+	// Check MaxRefresh
+	if c.MaxRefresh < NoLimit {
+		return fmt.Errorf("MaxRefresh must be >= -1, got: %d", c.MaxRefresh)
+	}
+
+	// Check MaxRefresh does not exceed Timeout
+	if c.Timeout != NoLimit && c.MaxRefresh > c.Timeout {
+		return fmt.Errorf("MaxRefresh (%d) cannot be greater than Timeout (%d)", c.MaxRefresh, c.Timeout)
+	}
+
+	// Check RenewInterval
+	if c.RenewInterval < NoLimit {
+		return fmt.Errorf("RenewInterval must be >= -1, got: %d", c.RenewInterval)
 	}
 
 	// Check ActiveTimeout
@@ -263,6 +286,18 @@ func (c *Config) SetTokenName(name string) *Config {
 // SetTimeout Set timeout duration | 设置超时时间
 func (c *Config) SetTimeout(timeout int64) *Config {
 	c.Timeout = timeout
+	return c
+}
+
+// SetMaxRefresh Set threshold for async token renewal | 设置Token自动续期触发阈值
+func (c *Config) SetMaxRefresh(refresh int64) *Config {
+	c.MaxRefresh = refresh
+	return c
+}
+
+// SetRenewInterval Set minimum interval between token renewals | 设置Token最小续期间隔
+func (c *Config) SetRenewInterval(interval int64) *Config {
+	c.RenewInterval = interval
 	return c
 }
 
