@@ -40,7 +40,7 @@ func CloseManager() {
 	mu.Lock()
 	defer mu.Unlock()
 	if globalManager != nil {
-		globalManager.Close()
+		globalManager.CloseManager()
 		globalManager = nil // 置 nil 避免后续误用
 	}
 }

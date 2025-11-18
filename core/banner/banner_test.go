@@ -369,3 +369,11 @@ func BenchmarkFormatConfigLine(b *testing.B) {
 		formatConfigLine("Token Name", "sa-token")
 	}
 }
+
+// TestPrintWithConfigVisual is a visual test that prints the full banner and config to stdout.
+// It does not assert anything — useful for manual inspection during development.
+func TestPrintWithConfigVisual(t *testing.T) {
+	t.Log("=== Visual Output of PrintWithConfig (Default Config) ===")
+	PrintWithConfig(config.DefaultConfig())
+	t.Log("=== End of Visual Output ===")
+}

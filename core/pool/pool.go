@@ -159,7 +159,6 @@ func (m *RenewPoolManager) autoScale() {
 					newCap = m.config.MaxSize
 				}
 				m.pool.Tune(newCap) // Apply new pool capacity | 调整 ants 池容量
-				fmt.Printf("RenewPool Scale up: %d → %d (usage %.0f%%)\n", capacity, newCap, usage*100)
 
 			// Reduce if usage below threshold and capacity > MinSize | 当使用率低于缩容阈值且容量大于最小值时缩容
 			case usage < m.config.ScaleDownRate && capacity > m.config.MinSize:
@@ -168,7 +167,6 @@ func (m *RenewPoolManager) autoScale() {
 					newCap = m.config.MinSize
 				}
 				m.pool.Tune(newCap) // Apply new pool capacity | 调整 ants 池容量
-				fmt.Printf("RenewPool Scale down: %d → %d (usage %.0f%%)\n", capacity, newCap, usage*100)
 			}
 
 			m.mu.Unlock() // Unlock after adjustment | 解锁

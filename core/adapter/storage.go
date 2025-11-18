@@ -9,6 +9,9 @@ type Storage interface {
 	// Set sets key-value pair with optional expiration time (0 means never expire) | 设置键值对，可选过期时间（0表示永不过期）
 	Set(key string, value any, expiration time.Duration) error
 
+	// SetKeepTTL sets key-value pair but keeps the original TTL unchanged | 设置键值但保持原有TTL不变
+	SetKeepTTL(key string, value any) error
+
 	// Get gets value by key, returns nil if key doesn't exist | 获取键对应的值，键不存在时返回nil
 	Get(key string) (any, error)
 

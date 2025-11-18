@@ -71,6 +71,30 @@ func (s *Storage) Set(key string, value any, expiration time.Duration) error {
 	return nil
 }
 
+// SetKeepTTL Sets value without modifying TTL | 设置键值但不改变TTL
+func (s *Storage) SetKeepTTL(key string, value any) error {
+	now := time.Now().Unix()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	item, exists := s.data[key]
+	if !exists {
+		return ErrKeyNotFound
+	}
+
+	// If expired, treat as not found | 如果已经过期，则视为不存在
+	if item.isExpired(now) {
+		delete(s.data, key)
+		return ErrKeyExpired
+	}
+
+	// Replace value only, keep original expiration | 仅更新value，保持expiration不变
+	item.value = value
+
+	return nil
+}
+
 // Get 获取值
 func (s *Storage) Get(key string) (any, error) {
 	now := time.Now().Unix()
