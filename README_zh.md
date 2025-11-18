@@ -516,6 +516,12 @@ stputil.SetManager(manager)
 
 [→ 查看事件监听完整文档](docs/guide/listener_zh.md)
 
+## 🏗️ 架构讨论
+
+下面通过架构图来更直观地理解 sa-token-go 的设计思路和组件关系：
+
+<img src="docs/IMG_3976.JPG" alt="sa-token-go 架构图" width="200px" height="300px" />
+
 ## 📦 项目结构
 
 ```
@@ -620,9 +626,19 @@ Apache License 2.0
 
 参考 [sa-token](https://github.com/dromara/sa-token) 设计
 
+### 贡献者
+
+特别感谢以下贡献者的宝贵贡献：
+
+- [@qprodn](https://github.com/qprodn)
+- [@Zany2](https://github.com/Zany2)
+- [@zyw](https://github.com/zyw)
+- [@nuanxinqing123](https://github.com/nuanxinqing123)
+- [@vera-byte](https://github.com/vera-byte)
+- [@MoLing-Dong](https://github.com/MoLing-Dong)
+
 ## 📞 支持
 
-- 📧 邮箱: <support@sa-token-go.dev>
 - 💬 问题反馈: [GitHub Issues](https://github.com/click33/sa-token-go/issues)
 - 📖 文档: [docs/](docs/)
 

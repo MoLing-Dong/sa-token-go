@@ -618,6 +618,17 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - Inspired by [sa-token](https://github.com/dromara/sa-token) - A powerful Java authentication framework
 - Built with ❤️ using Go
 
+### Contributors
+
+Special thanks to the following contributors for their valuable contributions:
+
+- [@qprodn](https://github.com/qprodn)
+- [@Zany2](https://github.com/Zany2)
+- [@zyw](https://github.com/zyw)
+- [@nuanxinqing123](https://github.com/nuanxinqing123)
+- [@vera-byte](https://github.com/vera-byte)
+- [@MoLing-Dong](https://github.com/MoLing-Dong)
+
 ## 📞 Support
 
 - 📧 Email: <support@sa-token-go.dev>

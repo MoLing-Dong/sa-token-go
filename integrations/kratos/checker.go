@@ -169,11 +169,11 @@ func (c *OrChecker) Check(ctx context.Context, manager *core.Manager, loginID st
 
 	var lastErr error
 	for _, checker := range c.checkers {
-		if err := checker.Check(ctx, manager, loginID); err == nil {
+		err := checker.Check(ctx, manager, loginID)
+		if err == nil {
 			return nil
-		} else {
-			lastErr = err
 		}
+		lastErr = err
 	}
 
 	return lastErr

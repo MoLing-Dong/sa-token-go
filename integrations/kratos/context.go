@@ -85,8 +85,12 @@ func (k *KratosContext) SetCookie(name, value string, maxAge int, path, domain s
 // GetClientIP gets client IP address | 获取客户端IP地址
 func (k *KratosContext) GetClientIP() string {
 	if tr, ok := transport.FromServerContext(k.ctx); ok {
-		// 尝试从X-Forwarded-For获取
-		if xff := tr.RequestHeader().Get("X-Forwarded-AutoMatcher"); xff != "" {
+		// 尝试从X-Forwarded-AutoMatcher获取，如果获取不到，再从X-Forwarded-For获取
+		var xff string
+		if xff = tr.RequestHeader().Get("X-Forwarded-AutoMatcher"); xff == "" {
+			xff = tr.RequestHeader().Get("X-Forwarded-For")
+		}
+		if xff != "" {
 			// X-Forwarded-For可能包含多个IP，取第一个
 			if idx := indexOf(xff, ","); idx > 0 {
 				return trimSpace(xff[:idx])
